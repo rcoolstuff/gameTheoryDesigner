@@ -1,7 +1,15 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import { FileText, GitBranch, Network, Sparkles, UploadCloud } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Slider } from "@/components/ui/slider";
+import { Textarea } from "@/components/ui/textarea";
 
 type GameType = "auto" | "bargaining" | "coordination" | "chicken" | "prisoners";
 
@@ -20,11 +28,21 @@ type GameModel = {
   players: [string, string];
   frame: string;
   tension: string;
-  moves: [string, string];
-  responses: [string, string];
+  moves: string[];
+  responses: string[];
   cells: PayoffCell[];
+  pathSteps: Array<{ actor: string; action: string; detail: string; payoff?: string }>;
   states: Array<{ name: string; score: number; detail: string }>;
   assumptions: string[];
+};
+
+type StepNodeData = {
+  actor: string;
+  action: string;
+  detail: string;
+  payoff?: string;
+  index: number;
+  isRecommended: boolean;
 };
 
 const defaultContext =
@@ -33,26 +51,26 @@ const defaultContext =
 const archetypes = {
   bargaining: {
     frame: "Sequential bargaining",
-    moves: ["Flexible package", "Hard opening"] as [string, string],
-    responses: ["Accept guardrails", "Demand upside"] as [string, string],
+    moves: ["Flexible package", "Hard opening", "Pilot first", "Walkaway threat"],
+    responses: ["Accept guardrails", "Demand upside", "Ask validation", "Delay decision"],
     tension: "Value creation vs. value capture",
   },
   coordination: {
     frame: "Coordination game",
-    moves: ["Commit early", "Wait for proof"] as [string, string],
-    responses: ["Match commitment", "Preserve option"] as [string, string],
+    moves: ["Commit early", "Wait for proof", "Set standard", "Split rollout"],
+    responses: ["Match commitment", "Preserve option", "Request signal", "Coordinate later"],
     tension: "Mutual confidence vs. timing risk",
   },
   chicken: {
     frame: "Brinkmanship game",
-    moves: ["Hold line", "Concede scope"] as [string, string],
-    responses: ["Hold line", "Concede economics"] as [string, string],
+    moves: ["Hold line", "Concede scope", "Escalate deadline", "Offer bridge"],
+    responses: ["Hold line", "Concede economics", "Counter-threat", "Seek pause"],
     tension: "Credible threat vs. costly delay",
   },
   prisoners: {
     frame: "Trust dilemma",
-    moves: ["Share information", "Withhold leverage"] as [string, string],
-    responses: ["Share information", "Withhold leverage"] as [string, string],
+    moves: ["Share information", "Withhold leverage", "Stage disclosure", "Audit terms"],
+    responses: ["Share information", "Withhold leverage", "Reciprocate later", "Demand proof"],
     tension: "Transparency vs. exploitation risk",
   },
 };
@@ -93,7 +111,22 @@ function detectTension(text: string, fallback: string) {
   return fallback;
 }
 
-function generateGame(context: string, selectedType: GameType, risk: number, files: File[]): GameModel {
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function jointValue(cell: PayoffCell) {
+  return cell.aPayoff + cell.bPayoff;
+}
+
+function generateGame(
+  context: string,
+  selectedType: GameType,
+  risk: number,
+  actionCount: number,
+  stepCount: number,
+  files: File[],
+): GameModel {
   const type = inferGameType(context, selectedType);
   const archetype = archetypes[type];
   const [a, b] = extractPlayers(context);
@@ -101,38 +134,58 @@ function generateGame(context: string, selectedType: GameType, risk: number, fil
   const confidence = Math.min(92, Math.max(58, 66 + Math.round(context.length / 70) + docSignal));
   const tension = detectTension(context, archetype.tension);
   const riskPenalty = Math.round((risk - 50) / 10);
+  const size = clamp(actionCount, 2, 4);
+  const moves = archetype.moves.slice(0, size);
+  const responses = archetype.responses.slice(0, size);
+  const cells: PayoffCell[] = moves.flatMap((move, rowIndex) =>
+    responses.map((response, columnIndex) => {
+      const coordinationBonus = rowIndex === columnIndex ? 2 : 0;
+      const captureTilt = columnIndex - rowIndex;
+      const distancePenalty = Math.abs(rowIndex - columnIndex);
+      const aPayoff = clamp(8 - rowIndex - distancePenalty - Math.max(0, riskPenalty) + Math.max(0, -captureTilt), 1, 10);
+      const bPayoff = clamp(8 - columnIndex - distancePenalty - Math.max(0, -riskPenalty) + Math.max(0, captureTilt) + coordinationBonus, 1, 10);
+      const notes = [
+        "Highest joint-value package if the parties can make constraints explicit.",
+        `${b} captures more upside while ${a} preserves momentum.`,
+        `${a} captures stronger terms, but relationship quality weakens.`,
+        "Impasse risk: value leaks into delay, process cost, and alternatives.",
+        "Staged option keeps the deal alive while deferring contested value.",
+        "Validation-heavy route lowers risk but slows conversion to value.",
+      ];
 
-  const cells: PayoffCell[] = [
-    {
-      aMove: archetype.moves[0],
-      bMove: archetype.responses[0],
-      aPayoff: 8 - Math.max(0, riskPenalty),
-      bPayoff: 8 + Math.min(1, riskPenalty),
-      note: "Cooperative package with high joint value and explicit guardrails.",
-      best: true,
-    },
-    {
-      aMove: archetype.moves[0],
-      bMove: archetype.responses[1],
-      aPayoff: 5 - Math.max(0, riskPenalty),
-      bPayoff: 9,
-      note: `${b} captures more upside while ${a} preserves momentum.`,
-    },
-    {
-      aMove: archetype.moves[1],
-      bMove: archetype.responses[0],
-      aPayoff: 9,
-      bPayoff: 5 - Math.max(0, -riskPenalty),
-      note: `${a} captures stronger terms, but relationship quality weakens.`,
-    },
-    {
-      aMove: archetype.moves[1],
-      bMove: archetype.responses[1],
-      aPayoff: 3 - Math.max(0, riskPenalty),
-      bPayoff: 3 - Math.max(0, -riskPenalty),
-      note: "Impasse risk: value leaks into delay, process cost, and alternatives.",
-    },
-  ];
+      return {
+        aMove: move,
+        bMove: response,
+        aPayoff,
+        bPayoff,
+        note: notes[(rowIndex * responses.length + columnIndex) % notes.length],
+      };
+    }),
+  );
+  const bestCell = cells.reduce((best, cell) => (jointValue(cell) > jointValue(best) ? cell : best), cells[0]);
+  bestCell.best = true;
+  const rankedCells = [...cells].sort((left, right) => jointValue(right) - jointValue(left));
+  const pathSteps = Array.from({ length: clamp(stepCount, 3, 6) }, (_, index) => {
+    const cell = rankedCells[index % rankedCells.length];
+    const isA = index % 2 === 0;
+    const actor = isA ? a : b;
+    const action = isA ? cell.aMove : cell.bMove;
+    const details = [
+      "opens with the frame that anchors the game",
+      "tests the tradeoff and exposes non-price constraints",
+      "packages scope, timing, safeguards, and upside",
+      "compares the offer against BATNA pressure",
+      "narrows the zone of possible agreement",
+      "commits only if the payoff shape remains stable",
+    ];
+
+    return {
+      actor,
+      action,
+      detail: details[index],
+      payoff: index >= 2 ? `${cell.aPayoff}, ${cell.bPayoff}` : undefined,
+    };
+  });
 
   return {
     title: sentenceCase(`${tension} negotiation game`),
@@ -140,19 +193,21 @@ function generateGame(context: string, selectedType: GameType, risk: number, fil
     players: [a, b],
     frame: archetype.frame,
     tension,
-    moves: archetype.moves,
-    responses: archetype.responses,
+    moves,
+    responses,
     cells,
+    pathSteps,
     states: [
-      { name: "Integrated deal", score: cells[0].aPayoff + cells[0].bPayoff, detail: "Best joint value" },
-      { name: `${a} favored`, score: cells[2].aPayoff + cells[2].bPayoff, detail: "Higher capture, lower trust" },
-      { name: `${b} favored`, score: cells[1].aPayoff + cells[1].bPayoff, detail: "Upside shifts toward partner" },
-      { name: "No agreement", score: Math.max(2, cells[3].aPayoff + cells[3].bPayoff), detail: "Delay and BATNA fallback" },
+      { name: "Integrated deal", score: jointValue(rankedCells[0]), detail: "Best joint value" },
+      { name: `${a} favored`, score: jointValue(rankedCells.find((cell) => cell.aPayoff > cell.bPayoff) || rankedCells[1]), detail: "Higher capture, lower trust" },
+      { name: `${b} favored`, score: jointValue(rankedCells.find((cell) => cell.bPayoff > cell.aPayoff) || rankedCells[2]), detail: "Upside shifts toward partner" },
+      { name: "No agreement", score: Math.max(2, jointValue(rankedCells[rankedCells.length - 1])), detail: "Delay and BATNA fallback" },
     ],
     assumptions: [
       `${a} values speed, rights, or strategic access enough to trade on economics.`,
       `${b} has non-price constraints that must be made explicit before payoffs are stable.`,
-      "The efficient frontier likely comes from packaging scope, safeguards, timing, and upside.",
+      `The matrix is currently ${moves.length} by ${responses.length}; expanding actions adds more possible strategic states, not just visual cells.`,
+      `The path is modeled as ${pathSteps.length} negotiation steps; shorter games emphasize commitment, longer games expose sequencing risk.`,
       files.length
         ? `${files.length} PDF source${files.length > 1 ? "s were" : " was"} treated as context signals; full text extraction is next.`
         : "Document ingestion is ready for PDFs; this prototype currently uses filenames as context signals.",
@@ -164,9 +219,14 @@ export default function Home() {
   const [context, setContext] = useState(defaultContext);
   const [gameType, setGameType] = useState<GameType>("auto");
   const [risk, setRisk] = useState(44);
+  const [actionCount, setActionCount] = useState(3);
+  const [stepCount, setStepCount] = useState(5);
   const [files, setFiles] = useState<File[]>([]);
 
-  const game = useMemo(() => generateGame(context, gameType, risk, files), [context, gameType, risk, files]);
+  const game = useMemo(
+    () => generateGame(context, gameType, risk, actionCount, stepCount, files),
+    [context, gameType, risk, actionCount, stepCount, files],
+  );
 
   function addFiles(fileList: FileList | null) {
     if (!fileList) return;
@@ -187,17 +247,15 @@ export default function Home() {
               <p className="mt-2 text-[0.8rem] leading-snug text-muted">Model the negotiation before you make the move.</p>
             </div>
           </div>
-          <div className="mt-4 inline-flex rounded-full border border-sage/25 bg-[#dfeee5]/70 px-3 py-2 text-xs font-black text-teal">
-            Prototype
-          </div>
+          <Badge className="mt-4">Prototype</Badge>
         </div>
 
-        <label className="text-[0.72rem] font-black uppercase tracking-[0.06em] text-muted" htmlFor="context">
+        <Label className="text-muted" htmlFor="context">
           Context prompts
-        </label>
-        <textarea
+        </Label>
+        <Textarea
           id="context"
-          className="min-h-[230px] w-full resize-y rounded-surface border border-line bg-white px-4 py-4 leading-relaxed outline-none focus:border-teal focus:ring-4 focus:ring-teal/10"
+          className="min-h-[230px]"
           value={context}
           onChange={(event) => setContext(event.target.value)}
         />
@@ -223,32 +281,54 @@ export default function Home() {
         )}
 
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-2">
-            <span className="text-[0.72rem] font-black uppercase tracking-[0.06em] text-[#426d90]">Game type</span>
-            <select className="h-11 rounded-surface border border-line bg-white px-3 outline-none focus:border-teal focus:ring-4 focus:ring-teal/10" value={gameType} onChange={(event) => setGameType(event.target.value as GameType)}>
-              <option value="auto">Auto infer</option>
-              <option value="bargaining">Bargaining</option>
-              <option value="coordination">Coordination</option>
-              <option value="chicken">Chicken</option>
-              <option value="prisoners">Prisoner&apos;s dilemma</option>
-            </select>
-          </label>
-          <label className="grid gap-2">
-            <span className="text-[0.72rem] font-black uppercase tracking-[0.06em] text-[#426d90]">Risk stance</span>
-            <input className="w-full accent-teal" type="range" min="0" max="100" value={risk} onChange={(event) => setRisk(Number(event.target.value))} />
-          </label>
+          <div className="grid gap-2">
+            <Label>Game type</Label>
+            <Select value={gameType} onValueChange={(value) => setGameType(value as GameType)}>
+              <SelectTrigger>
+                <SelectValue placeholder="Auto infer" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto infer</SelectItem>
+                <SelectItem value="bargaining">Bargaining</SelectItem>
+                <SelectItem value="coordination">Coordination</SelectItem>
+                <SelectItem value="chicken">Chicken</SelectItem>
+                <SelectItem value="prisoners">Prisoner&apos;s dilemma</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid gap-2">
+            <Label>Risk stance</Label>
+            <Slider value={[risk]} min={0} max={100} step={1} onValueChange={([value]) => setRisk(value)} />
+          </div>
         </div>
 
-        <button className="min-h-12 rounded-surface bg-graphite px-4 font-black text-[#f9f7f1] shadow-tight transition hover:-translate-y-px hover:bg-[#111513]">
+        <div className="grid gap-3 rounded-surface border border-line bg-white/60 p-3">
+          <div className="grid gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <Label>Actions per player</Label>
+              <strong className="rounded-md border border-line bg-white px-2 py-1 text-xs">{actionCount} x {actionCount}</strong>
+            </div>
+            <Slider value={[actionCount]} min={2} max={4} step={1} onValueChange={([value]) => setActionCount(value)} />
+          </div>
+          <div className="grid gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <Label>Negotiation steps</Label>
+              <strong className="rounded-md border border-line bg-white px-2 py-1 text-xs">{stepCount}</strong>
+            </div>
+            <Slider value={[stepCount]} min={3} max={6} step={1} onValueChange={([value]) => setStepCount(value)} />
+          </div>
+        </div>
+
+        <Button className="min-h-12">
           Generate game frame
-        </button>
+        </Button>
 
         <section className="mt-auto rounded-surface border border-line bg-white/65 p-4">
           <h2 className="font-black">Workflow</h2>
           <ol className="mt-3 grid gap-2 pl-5 text-sm leading-tight text-muted">
             <li>Collect messy context and documents.</li>
-            <li>Infer players, moves, payoffs, BATNAs, and assumptions.</li>
-            <li>Render a clean game frame users can challenge.</li>
+            <li>Infer players, variable actions, payoffs, BATNAs, and assumptions.</li>
+            <li>Render a flexible game frame users can challenge.</li>
             <li>Compare deal states, risks, and bargaining zones visually.</li>
           </ol>
         </section>
@@ -270,7 +350,7 @@ export default function Home() {
           <Summary label="Player A" value={game.players[0]} />
           <Summary label="Player B" value={game.players[1]} />
           <Summary label="Core tension" value={game.tension} />
-          <Summary label="Recommended frame" value={game.frame} />
+          <Summary label="Game size" value={`${game.moves.length} x ${game.responses.length} matrix, ${game.pathSteps.length} steps`} />
         </div>
 
         <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(420px,1.12fr)_minmax(340px,0.88fr)]">
@@ -306,43 +386,51 @@ export default function Home() {
 
 function Summary({ label, value }: { label: string; value: string }) {
   return (
-    <article className="min-h-[78px] rounded-surface border border-line bg-white/75 p-4">
+    <Card className="min-h-[78px] p-4">
       <span className="block text-xs font-black text-muted">{label}</span>
       <strong className="mt-2 block break-words leading-tight">{value}</strong>
-    </article>
+    </Card>
   );
 }
 
 function Panel({ eyebrow, title, icon, children }: { eyebrow: string; title: string; icon: React.ReactNode; children: React.ReactNode }) {
   return (
-    <article className="min-w-0 overflow-hidden rounded-surface border border-line bg-white/75 p-5">
-      <div className="mb-4 flex items-start justify-between gap-3">
+    <Card className="min-w-0 overflow-hidden">
+      <CardHeader>
         <div>
           <p className="text-[0.72rem] font-black uppercase tracking-[0.06em] text-[#426d90]">{eyebrow}</p>
-          <h3 className="mt-1 text-lg font-black">{title}</h3>
+          <CardTitle className="mt-1">{title}</CardTitle>
         </div>
         <div className="rounded-md border border-line bg-white p-2 text-teal">{icon}</div>
-      </div>
-      {children}
-    </article>
+      </CardHeader>
+      <CardContent>{children}</CardContent>
+    </Card>
   );
 }
 
 function PayoffMatrix({ game }: { game: GameModel }) {
-  const cells = [
-    <div key="blank" className="hidden min-h-[54px] rounded-surface border border-line bg-white/40 md:block" />,
-    ...game.responses.map((response) => (
-      <div key={response} className="grid min-h-[54px] place-items-center rounded-surface border border-line bg-[#edf2f0] px-3 text-center font-black leading-tight text-[#426d90]">
-        {response}
+  return (
+    <div className="-mx-1 overflow-x-auto px-1 pb-1">
+      <div
+        className="grid min-w-[720px] gap-2"
+        style={{ gridTemplateColumns: `minmax(112px, 0.72fr) repeat(${game.responses.length}, minmax(148px, 1fr))` }}
+      >
+        <div className="min-h-[54px] rounded-surface border border-line bg-white/40" />
+        {game.responses.map((response) => (
+          <div key={response} className="grid min-h-[54px] place-items-center rounded-surface border border-line bg-[#edf2f0] px-3 text-center font-black leading-tight text-[#426d90]">
+            {response}
+          </div>
+        ))}
+        {game.moves.flatMap((move) => [
+          <MatrixHeader key={move} label={move} />,
+          ...game.responses.map((response) => {
+            const cell = game.cells.find((item) => item.aMove === move && item.bMove === response);
+            return cell ? <Payoff key={`${move}-${response}`} cell={cell} /> : null;
+          }),
+        ])}
       </div>
-    )),
-    <MatrixHeader key={game.moves[0]} label={game.moves[0]} />,
-    ...game.cells.slice(0, 2).map((cell) => <Payoff key={`${cell.aMove}-${cell.bMove}`} cell={cell} />),
-    <MatrixHeader key={game.moves[1]} label={game.moves[1]} />,
-    ...game.cells.slice(2).map((cell) => <Payoff key={`${cell.aMove}-${cell.bMove}`} cell={cell} />),
-  ];
-
-  return <div className="grid gap-2 md:grid-cols-[minmax(82px,0.72fr)_repeat(2,minmax(132px,1fr))]">{cells}</div>;
+    </div>
+  );
 }
 
 function MatrixHeader({ label }: { label: string }) {
@@ -351,7 +439,7 @@ function MatrixHeader({ label }: { label: string }) {
 
 function Payoff({ cell }: { cell: PayoffCell }) {
   return (
-    <div className={`min-h-[116px] rounded-surface border p-4 ${cell.best ? "border-sage/50 bg-[#dff1e8]" : "border-line bg-white/80"}`}>
+    <div data-testid="payoff-cell" className={`min-h-[116px] rounded-surface border p-4 ${cell.best ? "border-sage/50 bg-[#dff1e8]" : "border-line bg-white/80"}`}>
       <div className="mb-2 flex items-baseline justify-between gap-3">
         <strong className="text-3xl leading-none">{cell.aPayoff}, {cell.bPayoff}</strong>
         <span className="text-muted">A, B</span>
@@ -362,7 +450,7 @@ function Payoff({ cell }: { cell: PayoffCell }) {
 }
 
 function Frontier({ game }: { game: GameModel }) {
-  const best = game.cells[0];
+  const best = game.cells.reduce((current, cell) => (jointValue(cell) > jointValue(current) ? cell : current), game.cells[0]);
   return (
     <div className="frontier-grid relative min-h-[306px] border-b-2 border-l-2 border-graphite">
       <div className="absolute bottom-[16%] right-[9%] h-[56%] w-[64%] rounded-tr-[78px] border-r-[5px] border-t-[5px] border-sage/80" />
@@ -380,56 +468,78 @@ function Frontier({ game }: { game: GameModel }) {
 }
 
 function GameTree({ game }: { game: GameModel }) {
-  const [a, b] = game.players;
+  const nodeTypes = useMemo(() => ({ step: StepNode }), []);
+  const nodes: Node<StepNodeData>[] = useMemo(
+    () =>
+      game.pathSteps.map((step, index) => ({
+        id: `step-${index}`,
+        type: "step",
+        position: {
+          x: index * 210,
+          y: index % 2 === 0 ? 40 : 190,
+        },
+        data: {
+          ...step,
+          index,
+          isRecommended: index === 0 || index === game.pathSteps.length - 1,
+        },
+      })),
+    [game.pathSteps],
+  );
+  const edges: Edge[] = useMemo(
+    () =>
+      game.pathSteps.slice(1).map((_, index) => ({
+        id: `edge-${index}-${index + 1}`,
+        source: `step-${index}`,
+        target: `step-${index + 1}`,
+        type: "smoothstep",
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#69757b" },
+        style: { stroke: "#69757b", strokeWidth: 2 },
+      })),
+    [game.pathSteps],
+  );
+
   return (
-    <svg className="min-h-[306px] w-full rounded-surface" viewBox="0 0 680 320" role="img" aria-label="Game tree visualization">
-      <defs>
-        <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
-          <path d="M0,0 L0,6 L9,3 z" fill="#69757b" />
-        </marker>
-      </defs>
-      <g fill="none" stroke="#69757b" strokeWidth="2" markerEnd="url(#arrow)">
-        <path d="M110 160 C190 80, 230 70, 300 78" />
-        <path d="M110 160 C190 238, 230 248, 300 240" />
-        <path d="M330 78 C420 48, 470 48, 560 58" />
-        <path d="M330 78 C420 116, 470 122, 560 134" />
-        <path d="M330 240 C420 204, 470 198, 560 188" />
-        <path d="M330 240 C420 276, 470 280, 560 268" />
-      </g>
-      <TreeNode x={96} y={160} label={a} />
-      <TreeNode x={318} y={78} label={game.moves[0]} />
-      <TreeNode x={318} y={240} label={game.moves[1]} />
-      {game.cells.map((cell, index) => (
-        <TreeLeaf key={`${cell.aMove}-${cell.bMove}-${index}`} x={584} y={[58, 134, 188, 268][index]} cell={cell} />
-      ))}
-      <text x="172" y="86" fill="#69716d" fontSize="12" fontWeight="750">{a} opens</text>
-      <text x="390" y="40" fill="#69716d" fontSize="12" fontWeight="750">{b} responds</text>
-    </svg>
+    <div className="h-[360px] overflow-hidden rounded-surface border border-line bg-[#fbfaf6]">
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={nodeTypes}
+        fitView
+        minZoom={0.35}
+        maxZoom={1.4}
+        proOptions={{ hideAttribution: true }}
+      >
+        <Background color="#d8d4ca" gap={24} />
+        <Controls position="bottom-right" />
+        <MiniMap
+          position="bottom-left"
+          pannable
+          zoomable
+          nodeColor={(node) => (node.data?.isRecommended ? "#6f9c82" : "#d8d4ca")}
+          maskColor="rgba(244, 241, 234, 0.72)"
+        />
+      </ReactFlow>
+    </div>
   );
 }
 
-function TreeNode({ x, y, label }: { x: number; y: number; label: string }) {
+function StepNode({ data }: NodeProps<Node<StepNodeData>>) {
   return (
-    <>
-      <circle cx={x} cy={y} r="30" fill="#ffffff" stroke="#202522" strokeWidth="2" />
-      <text x={x} y={y + 5} textAnchor="middle" fill="#202522" fontSize="13" fontWeight="850">
-        {label.slice(0, 16)}
-      </text>
-    </>
-  );
-}
-
-function TreeLeaf({ x, y, cell }: { x: number; y: number; cell: PayoffCell }) {
-  return (
-    <>
-      <rect x={x - 68} y={y - 24} width="136" height="48" rx="8" fill={cell.best ? "#dff4ea" : "#ffffff"} stroke="#d9e0df" />
-      <text x={x} y={y - 4} textAnchor="middle" fill="#202522" fontSize="13" fontWeight="850">
-        {cell.bMove.slice(0, 18)}
-      </text>
-      <text x={x} y={y + 15} textAnchor="middle" fill="#69716d" fontSize="12" fontWeight="750">
-        Payoff {cell.aPayoff}, {cell.bPayoff}
-      </text>
-    </>
+    <div
+      data-testid="path-step"
+      className={`w-44 rounded-surface border bg-white p-3 shadow-tight ${data.isRecommended ? "border-sage bg-[#eef8f2]" : "border-line"}`}
+    >
+      <Handle type="target" position={Position.Left} className="!h-2.5 !w-2.5 !border-white !bg-teal" />
+      <div className="flex items-center justify-between gap-2">
+        <span className="rounded-md bg-graphite px-2 py-1 text-[0.68rem] font-black text-white">STEP {data.index + 1}</span>
+        {data.payoff && <span className="text-xs font-black text-amber">{data.payoff}</span>}
+      </div>
+      <p className="mt-3 text-[0.7rem] font-black uppercase tracking-[0.06em] text-[#426d90]">{data.actor}</p>
+      <strong className="mt-1 block leading-tight">{data.action}</strong>
+      <p className="mt-2 text-xs leading-snug text-muted">{data.detail}</p>
+      <Handle type="source" position={Position.Right} className="!h-2.5 !w-2.5 !border-white !bg-teal" />
+    </div>
   );
 }
 

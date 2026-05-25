@@ -13,3 +13,4 @@ pnpm-debug.log*
 .DS_Store
 .playwright-mcp
 game-theory-designer-*.png
+inspiration-*.png

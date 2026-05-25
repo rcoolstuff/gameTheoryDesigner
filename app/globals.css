@@ -40,3 +40,20 @@ input {
     linear-gradient(to bottom, rgba(216, 212, 202, 0.46) 1px, transparent 1px);
   background-size: 52px 52px;
 }
+
+.react-flow__controls,
+.react-flow__minimap {
+  border: 1px solid #d8d4ca;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 10px 26px rgba(29, 32, 30, 0.08);
+}
+
+.react-flow__controls-button {
+  border-bottom: 1px solid #e8e3da;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.react-flow__handle {
+  border-radius: 999px;
+}
