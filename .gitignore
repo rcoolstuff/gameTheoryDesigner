@@ -12,4 +12,4 @@ pnpm-debug.log*
 *.tsbuildinfo
 .DS_Store
 .playwright-mcp
-game-theory-designer-slick-*.png
+game-theory-designer-*.png
